@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"flag"
 	"io/ioutil"
 	"os"
@@ -13,73 +12,63 @@ import (
 	"log"
 )
 
-func loadOldIps() (oldIps []string, err error) {
-	f, ok := os.Open("old_ips.json")
-	if ok != nil {
-		log.Println("Failed to read the old_ips.json file, new installation?")
-		return
-	}
-	defer f.Close()
+type  Firewall struct {
+	ID             string
+	Name           string
+  InboundRules   []godo.InboundRule
+  OutboundRules  []godo.OutboundRule
+}
 
+
+
+func loadIps(filename string) (rules Firewall, err error) {
 	var b []byte
-	b, err = ioutil.ReadAll(f)
-	if err != nil {
-		return
-	}
 
-	err = json.Unmarshal(b, &oldIps)
-	return
-}
+	f, ok := os.Open(filename)
 
-func loadNewIps(ipAPI string) (newIps []string, err error) {
-	ipv4, ipv4err := callIPApi(ipAPI, true)
-	ipv6, ipv6err := callIPApi(ipAPI, false)
-
-	if ipv4err != nil && ipv6err != nil {
-		err = errors.New("Failed to load the ipv4 and the ipv6")
-		return
-	}
-
-	if ipv4err != nil {
-		log.Printf("Failed to get the ipv4 address, is this machine ipv6 only? %s", ipv4err)
-	} else {
-		newIps = append(newIps, ipv4)
-		log.Printf("Current ipv4 address: %s", ipv4)
-	}
-
-	if ipv6err != nil {
-		log.Printf("Failed to get the ipv6 address, is this machine ipv4 only? %s", ipv6err)
-	} else {
-		newIps = append(newIps, ipv6)
-		log.Printf("Current ipv6 address: %s", ipv6)
-	}
-
-	return
-}
-
-func saveNewIps(newIps []string) (err error) {
-	f, err := os.Create("old_ips.json")
-	if err != nil {
-		return
-	}
 	defer f.Close()
 
-	b, err := json.Marshal(newIps)
+	if ok == nil {
+
+		b, err = ioutil.ReadAll(f)
+
+		if err == nil {
+			err = json.Unmarshal(b, &rules)
+
+		}
+	}
+
+	return rules,err
+
+}
+
+func saveIps(filename string, rules Firewall) (err error) {
+
+	f, err := os.Create(filename)
+	if err != nil {
+		return
+	}
+
+	defer f.Close()
+
+	b, err := json.MarshalIndent(rules, "", "  ")
 	if err != nil {
 		return
 	}
 
 	f.Write(b)
+
 	return
 }
 
 func main() {
-	var apiToken, ipAPI, firewallName, firewallID string
+	var apiToken, firewallName, firewallID, oldipsfile, newipsfile string
 
 	flag.StringVar(&apiToken, "token", "", "The digitalocean api token")
-	flag.StringVar(&ipAPI, "ip-api", "http://v4v6.ipv6-test.com/api/myip.php", "The url of the ip api")
 	flag.StringVar(&firewallName, "firewall-name", "", "The name of the firewall")
 	flag.StringVar(&firewallID, "firewall-id", "", "The id of the firewall")
+	flag.StringVar(&oldipsfile, "old-ips", "old_ips.json", "Old rules file")
+	flag.StringVar(&newipsfile, "new-ips", "new_ips.json", "New rules file")
 
 	flag.Parse()
 
@@ -91,29 +80,36 @@ func main() {
 		log.Fatal("You must specify the --firewall-name or the --firewall-id")
 	}
 
-	oldIps, err := loadOldIps()
+	oldIps,err := loadIps(oldipsfile)
+
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	newIps, err := loadNewIps(ipAPI)
+	newIps,err := loadIps(newipsfile)
+
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if reflect.DeepEqual(oldIps, newIps) {
-		log.Println("The ips didn't change.")
-		return
-	}
 
-	if len(oldIps) == 0 {
-		err = saveNewIps(newIps)
-		if err != nil {
-			log.Fatal(err)
+	newinstallation := false
+
+	if len(newIps.Name) == 0 && len(oldIps.Name) == 0 {
+
+		newinstallation = true
+
+		log.Println("New installation - downloading rules")
+
+	} else {
+
+		if reflect.DeepEqual(oldIps, newIps) {
+
+			log.Println("NO CHANGE")
+
+			return
+
 		}
-
-		log.Println("Firewall initiated successfully.")
-		return
 	}
 
 	client := newClient(apiToken)
@@ -132,38 +128,48 @@ func main() {
 	// Small hack to fix inconsistencies in the digitalocean api
 	firewall.InboundRules, firewall.OutboundRules = fixInboundOutboundRules(firewall.InboundRules, firewall.OutboundRules)
 
-	for _, rule := range firewall.InboundRules {
-		removed := false
+	if newinstallation {
 
-		for i, address := range rule.Sources.Addresses {
-			if address == oldIps[0] || (len(oldIps) > 1 && address == oldIps[1]) {
-				removed = true
-				rule.Sources.Addresses = append(rule.Sources.Addresses[:i], rule.Sources.Addresses[i+1:]...)
-			}
+		newIps = Firewall{firewall.ID,firewall.Name,firewall.InboundRules,firewall.OutboundRules}
+
+		err = saveIps(newipsfile,newIps)
+		if err != nil {
+			log.Fatal(err)
 		}
 
-		if removed {
-			rule.Sources.Addresses = append(rule.Sources.Addresses, newIps[:]...)
+	} else {
+
+
+		//var newrule bool
+		if newIps.Name == firewall.Name && newIps.ID == firewall.ID {
+			log.Println("Firewall Found: " + newIps.Name + " / " + newIps.ID)
+
+			fr := &godo.FirewallRequest{
+	 	 	Name:          firewall.Name,
+	 	 	InboundRules:  newIps.InboundRules,
+	 	 	OutboundRules: newIps.OutboundRules,
+	 	 	DropletIDs:    firewall.DropletIDs,
+	 	 	Tags:          firewall.Tags,
+	 	 }
+
+	 	 err = updateFirewall(client, firewall.ID, fr)
+
+	 	 if err != nil {
+	 	 	log.Fatal(err)
+	 	 }
+
+	 		log.Println("Firewall Name: " + firewall.Name + " ID: " + firewall.ID + " updated successfully")
+
 		}
+
+
+
 	}
 
-	fr := &godo.FirewallRequest{
-		Name:          firewall.Name,
-		InboundRules:  firewall.InboundRules,
-		OutboundRules: firewall.OutboundRules,
-		DropletIDs:    firewall.DropletIDs,
-		Tags:          firewall.Tags,
-	}
-
-	err = updateFirewall(client, firewall.ID, fr)
+	err = saveIps(oldipsfile,newIps)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = saveNewIps(newIps)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Println("Firewall rules updated successfully.")
+	log.Println("Rules file updated successfully")
 }
