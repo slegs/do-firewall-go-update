@@ -13,7 +13,7 @@ Update all your DigitalOcean firewall rules based on a json file. First run with
 Thereafter simply edit the downloaded rules in the ``new_ips.json`` file and if these are different to ``old_ips.json`` then the next run will update your firewall.
 
 ## Running it
-To run it do
+Build the executable and run it as below
 
 ```
 /path/to/executable --token DIGITALOCEAN_API_TOKEN --firewall-id THE_FIREWALL_ID
